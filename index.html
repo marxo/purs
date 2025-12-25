@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Минимални Скенер - ISO Извоз</title>
+    <script src="https://unpkg.com/@zxing/library@latest"></script>
+    <style>
+        body { font-family: sans-serif; text-align: center; margin: 0; padding: 20px; background: #f4f4f4; }
+        #video { width: 100%; max-width: 400px; background: #000; border-radius: 8px; }
+        .controls { margin: 20px 0; }
+        button { padding: 15px 25px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        #startBtn { background: #007bff; color: white; }
+        #downloadBtn { background: #28a745; color: white; margin-left: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background: white; font-size: 11px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background: #eee; }
+        .status { color: #555; margin: 10px 0; font-weight: bold; }
+        .link-btn { color: #007bff; text-decoration: none; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h3>📑 Скенер рачуна (ISO Извоз)</h3>
+    <div id="status" class="status">Кликните "ПОКРЕНИ КАМЕРУ"</div>
+    
+    <video id="video"></video>
+
+    <div class="controls">
+        <button id="startBtn">ПОКРЕНИ КАМЕРУ</button>
+        <button id="downloadBtn">EXCEL (CSV)</button>
+    </div>
+
+    <table id="resultTable">
+        <thead>
+            <tr>
+                <th>Датум (ISO)</th>
+                <th>ПФР</th>
+                <th>Предузеће</th>
+                <th>Износ</th>
+                <th>Линк</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <script>
+        const codeReader = new ZXing.BrowserQRCodeReader();
+        let scannedData = [];
+
+        // Помоћна функција за конверзију датума DD.MM.YYYY -> YYYY-MM-DD
+        function formatToISO(dateStr) {
+            if (!dateStr || dateStr === "Непознат") return "";
+            const parts = dateStr.split('.');
+            if (parts.length >= 3) {
+                return `${parts[2]}-${parts[1]}-${parts[0]}`;
+            }
+            return dateStr;
+        }
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            document.getElementById('status').innerText = "📷 Тражим QR код...";
+            codeReader.decodeFromVideoDevice(null, 'video', (result, err) => {
+                if (result) {
+                    if (navigator.vibrate) navigator.vibrate(100);
+                    processURL(result.text);
+                    codeReader.reset();
+                    setTimeout(() => document.getElementById('startBtn').click(), 2500);
+                }
+            });
+            document.getElementById('startBtn').style.display = 'none';
+        });
+
+        async function processURL(url) {
+            const proxy = "https://corsproxy.io/?";
+            try {
+                const response = await fetch(proxy + encodeURIComponent(url));
+                const html = await response.text();
+                
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, "text/html");
+                const fullText = doc.body.innerText;
+                const allLines = fullText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+                let shopName = "Непознато";
+                let pib = "Непознат";
+
+                const startIndex = allLines.findIndex(line => line.includes("ФИСКАЛНИ РАЧУН"));
+                if (startIndex !== -1) {
+                    for (let i = startIndex; i < allLines.length; i++) {
+                        if (/^\d{9}$/.test(allLines[i])) {
+                            pib = allLines[i];
+                            if (i + 1 < allLines.length) {
+                                shopName = allLines[i + 1];
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                if (pib === "Непознат") {
+                    const pibElem = doc.getElementById('pib');
+                    if (pibElem) pib = pibElem.innerText.trim();
+                }
+
+                if (shopName === "Непознато" || shopName.includes("Захтев за фискализацију")) {
+                    const shopElem = doc.getElementById('shopName');
+                    if (shopElem) shopName = shopElem.innerText.trim();
+                }
+
+                const pfrMatch = fullText.match(/[A-Z0-9]{8}-[A-Z0-9]{8}-\d+/);
+                const dateMatch = fullText.match(/(\d{2}\.\d{2}\.\d{4})/);
+                const iznosMatch = fullText.match(/Укупан износ[:\s]+([\d\.,]+)/i);
+
+                const rawDate = dateMatch ? dateMatch[1] : "Непознат";
+
+                const item = {
+                    isoDate: formatToISO(rawDate),
+                    pfr: pfrMatch ? pfrMatch[0] : "Грешка",
+                    shop: shopName,
+                    pib: pib,
+                    total: iznosMatch ? iznosMatch[1] : "0,00",
+                    url: url
+                };
+
+                scannedData.push(item);
+                updateTable();
+                document.getElementById('status').innerText = "✅ Додато: " + shopName;
+            } catch (e) {
+                document.getElementById('status').innerText = "⚠️ Грешка са конекцијом.";
+            }
+        }
+
+        function updateTable() {
+            const tbody = document.querySelector('#resultTable tbody');
+            tbody.innerHTML = scannedData.map(r => 
+                `<tr>
+                    <td>${r.isoDate}</td>
+                    <td><small>${r.pfr}</small></td>
+                    <td><strong>${r.shop}</strong><br><small>ПИБ: ${r.pib}</small></td>
+                    <td>${r.total}</td>
+                    <td><a href="${r.url}" target="_blank" class="link-btn">🔗</a></td>
+                </tr>`
+            ).join('');
+        }
+
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            if (scannedData.length === 0) return alert("Табела је празна");
+            
+            // Нови редослед колона за извоз: Датум, ПФР, Предузеће, Износ, Линк
+            let csv = "\uFEFFDatum,PFR,Preduzece,Iznos,Link\n";
+            scannedData.forEach(r => {
+                csv += `"${r.isoDate}","${r.pfr}","${r.shop}","${r.total}","${r.url}"\n`;
+            });
+
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = `racuni_export_${new Date().toISOString().split('T')[0]}.csv`;
+            link.click();
+        });
+    </script>
+</body>
+</html>
